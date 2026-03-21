@@ -29,10 +29,16 @@ impl WatchRuntime {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct WatchRoot {
+    path: PathBuf,
+    recursive: bool,
+}
+
 #[derive(Clone)]
 struct WatchSpec {
     kind: SpecKind,
-    root: PathBuf,
+    root: WatchRoot,
 }
 
 #[derive(Clone)]
@@ -42,10 +48,14 @@ enum SpecKind {
 }
 
 impl WatchSpec {
-    fn matches(&self, path: &Path) -> bool {
+    fn matches(&self, path: &Path, cwd: &Path) -> bool {
         match &self.kind {
-            SpecKind::Literal(expected) => path_key(path) == path_key(expected),
-            SpecKind::Glob(pattern) => pattern.matches_path(path),
+            SpecKind::Literal(expected) => {
+                normalized_path_key(path, cwd) == normalized_path_key(expected, cwd)
+            }
+            SpecKind::Glob(pattern) => path_candidates(path, cwd)
+                .into_iter()
+                .any(|candidate| pattern.matches_path(&candidate)),
         }
     }
 }
@@ -55,32 +65,43 @@ struct WorkerEntry {
     handle: tokio::task::JoinHandle<Result<()>>,
 }
 
+struct WatchPlan {
+    specs: Vec<WatchSpec>,
+    roots: Vec<WatchRoot>,
+}
+
 struct Coordinator {
     config: Config,
+    cwd: PathBuf,
     tx: mpsc::Sender<OutputLine>,
     handle: Handle,
     specs: Vec<WatchSpec>,
     labels: LabelRegistry,
     workers: HashMap<PathBuf, WorkerEntry>,
-    watched_roots: HashSet<PathBuf>,
+    watched_roots: HashSet<WatchRoot>,
+    pending_paths: HashMap<PathBuf, PathBuf>,
+    pending_wakes: HashSet<PathBuf>,
 }
 
 pub fn start(config: Config, tx: mpsc::Sender<OutputLine>) -> Result<WatchRuntime> {
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let plan = build_watch_plan(&config.inputs, &cwd)?;
     let startup_files =
         resolve_inputs(&config.inputs).context("failed to resolve startup files")?;
-    let specs = parse_specs(&config.inputs)?;
     let (stop_tx, stop_rx) = mpsc::channel();
     let handle = Handle::current();
 
-    let join =
-        thread::spawn(move || run_coordinator(config, startup_files, specs, tx, handle, stop_rx));
+    let join = thread::spawn(move || {
+        run_coordinator(config, cwd, startup_files, plan, tx, handle, stop_rx)
+    });
     Ok(WatchRuntime { stop_tx, join })
 }
 
 fn run_coordinator(
     config: Config,
+    cwd: PathBuf,
     startup_files: Vec<PathBuf>,
-    specs: Vec<WatchSpec>,
+    plan: WatchPlan,
     tx: mpsc::Sender<OutputLine>,
     handle: Handle,
     stop_rx: mpsc::Receiver<()>,
@@ -90,14 +111,17 @@ fn run_coordinator(
     let mut coordinator = Coordinator {
         labels: LabelRegistry::with_paths(&startup_files, config.prefix),
         config,
+        cwd,
         tx,
         handle,
-        specs,
+        specs: plan.specs,
         workers: HashMap::new(),
         watched_roots: HashSet::new(),
+        pending_paths: HashMap::new(),
+        pending_wakes: HashSet::new(),
     };
 
-    coordinator.watch_roots(&mut watcher)?;
+    coordinator.watch_roots(&mut watcher, &plan.roots)?;
     coordinator.attach_startup_files(startup_files);
 
     loop {
@@ -106,9 +130,16 @@ fn run_coordinator(
         }
 
         match event_rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(Ok(event)) => coordinator.process_event(event),
+            Ok(Ok(event)) => {
+                coordinator.ingest_event(event);
+                coordinator.drain_event_queue(&event_rx);
+                coordinator.flush_pending()?;
+            }
             Ok(Err(err)) => eprintln!("cattail: watch error: {err}"),
-            Err(mpsc::RecvTimeoutError::Timeout) => coordinator.refresh_from_scan()?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                coordinator.flush_pending()?;
+                coordinator.refresh_from_scan()?;
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -119,11 +150,16 @@ fn run_coordinator(
 }
 
 impl Coordinator {
-    fn watch_roots(&mut self, watcher: &mut impl Watcher) -> Result<()> {
-        for spec in &self.specs {
-            let root = spec.root.clone();
+    fn watch_roots(&mut self, watcher: &mut impl Watcher, roots: &[WatchRoot]) -> Result<()> {
+        for root in roots {
+            let root = normalize_watch_root(root.clone(), &self.cwd);
             if self.watched_roots.insert(root.clone()) {
-                watcher.watch(&root, RecursiveMode::Recursive)?;
+                let mode = if root.recursive {
+                    RecursiveMode::Recursive
+                } else {
+                    RecursiveMode::NonRecursive
+                };
+                watcher.watch(&root.path, mode)?;
             }
         }
         Ok(())
@@ -147,24 +183,53 @@ impl Coordinator {
         StartMode::FromBeginning
     }
 
-    fn process_event(&mut self, event: notify::Event) {
+    fn ingest_event(&mut self, event: notify::Event) {
         for path in event.paths {
-            let key = path_key(&path);
-            if let Some(worker) = self.workers.get(&key) {
-                worker.notify.notify_one();
+            let key = normalized_path_key(&path, &self.cwd);
+            self.pending_paths.entry(key).or_insert(path);
+        }
+    }
+
+    fn drain_event_queue(&mut self, event_rx: &mpsc::Receiver<notify::Result<notify::Event>>) {
+        while let Ok(next) = event_rx.try_recv() {
+            match next {
+                Ok(event) => self.ingest_event(event),
+                Err(err) => eprintln!("cattail: watch error: {err}"),
+            }
+        }
+    }
+
+    fn flush_pending(&mut self) -> Result<()> {
+        if self.pending_paths.is_empty() && self.pending_wakes.is_empty() {
+            return Ok(());
+        }
+
+        let pending_paths = std::mem::take(&mut self.pending_paths);
+        for (key, path) in pending_paths {
+            if self.workers.contains_key(&key) {
+                self.pending_wakes.insert(key);
                 continue;
             }
 
-            if self.specs.iter().any(|spec| spec.matches(&path)) {
+            if self.specs.iter().any(|spec| spec.matches(&path, &self.cwd)) {
                 let _ = self.attach(path, self.start_mode_for_dynamic());
             }
         }
+
+        let pending_wakes = std::mem::take(&mut self.pending_wakes);
+        for key in pending_wakes {
+            if let Some(worker) = self.workers.get(&key) {
+                worker.notify.notify_one();
+            }
+        }
+
+        Ok(())
     }
 
     fn refresh_from_scan(&mut self) -> Result<()> {
         let resolved = resolve_inputs(&self.config.inputs)?;
         for path in resolved {
-            let key = path_key(&path);
+            let key = normalized_path_key(&path, &self.cwd);
             if self.workers.contains_key(&key) {
                 continue;
             }
@@ -174,7 +239,7 @@ impl Coordinator {
     }
 
     fn attach(&mut self, path: PathBuf, start_mode: StartMode) -> Result<()> {
-        let key = path_key(&path);
+        let key = normalized_path_key(&path, &self.cwd);
         if self.workers.contains_key(&key) {
             return Ok(());
         }
@@ -213,77 +278,160 @@ impl Coordinator {
     }
 }
 
-fn parse_specs(inputs: &[String]) -> Result<Vec<WatchSpec>> {
+fn build_watch_plan(inputs: &[String], cwd: &Path) -> Result<WatchPlan> {
     let mut specs = Vec::with_capacity(inputs.len());
+    let mut roots = Vec::new();
+
     for input in inputs {
-        let kind = if has_glob_magic(input) {
-            SpecKind::Glob(
-                Pattern::new(input).with_context(|| format!("invalid glob pattern: {input}"))?,
-            )
-        } else {
-            SpecKind::Literal(PathBuf::from(input))
-        };
-        let root = watch_root_for_input(input);
-        specs.push(WatchSpec { kind, root });
+        let spec = build_spec(input, cwd)?;
+        insert_watch_root(&mut roots, spec.root.clone());
+        specs.push(spec);
     }
-    Ok(specs)
+
+    Ok(WatchPlan { specs, roots })
 }
 
-fn watch_root_for_input(input: &str) -> PathBuf {
-    let path = Path::new(input);
+fn build_spec(input: &str, cwd: &Path) -> Result<WatchSpec> {
     if has_glob_magic(input) {
-        let anchor = glob_anchor(path);
-        if anchor.is_dir() {
-            normalize_root(anchor)
-        } else {
-            normalize_root(
-                anchor
-                    .parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| anchor.to_path_buf()),
-            )
-        }
+        Ok(WatchSpec {
+            kind: SpecKind::Glob(
+                Pattern::new(input).with_context(|| format!("invalid glob pattern: {input}"))?,
+            ),
+            root: watch_root_for_glob(input, cwd),
+        })
     } else {
-        normalize_root(
-            path.parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from(".")),
-        )
+        Ok(WatchSpec {
+            kind: SpecKind::Literal(PathBuf::from(input)),
+            root: watch_root_for_literal(input, cwd),
+        })
     }
 }
 
-fn normalize_root(root: PathBuf) -> PathBuf {
-    if root.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        root
+fn insert_watch_root(roots: &mut Vec<WatchRoot>, candidate: WatchRoot) {
+    if roots.iter().any(|root| root_covers(root, &candidate)) {
+        return;
     }
+
+    roots.retain(|root| !root_covers(&candidate, root));
+    if let Some(existing) = roots
+        .iter_mut()
+        .find(|root| same_watch_root(root, &candidate))
+    {
+        existing.recursive |= candidate.recursive;
+        return;
+    }
+
+    roots.push(candidate);
 }
 
-fn glob_anchor(path: &Path) -> PathBuf {
-    let mut anchor = PathBuf::new();
-    for component in path.components() {
+fn same_watch_root(a: &WatchRoot, b: &WatchRoot) -> bool {
+    a.path == b.path
+}
+
+fn root_covers(base: &WatchRoot, other: &WatchRoot) -> bool {
+    if base.path == other.path {
+        return base.recursive || !other.recursive;
+    }
+
+    if !base.recursive {
+        return false;
+    }
+
+    other.path.strip_prefix(&base.path).is_ok()
+}
+
+fn watch_root_for_literal(input: &str, cwd: &Path) -> WatchRoot {
+    let path = Path::new(input);
+    let root = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    normalize_watch_root(
+        WatchRoot {
+            path: root,
+            recursive: false,
+        },
+        cwd,
+    )
+}
+
+fn watch_root_for_glob(input: &str, cwd: &Path) -> WatchRoot {
+    let path = Path::new(input);
+    let mut root = PathBuf::new();
+    let mut recursive = false;
+    let components: Vec<_> = path.components().collect();
+
+    for (idx, component) in components.iter().enumerate() {
         let piece = component.as_os_str().to_string_lossy();
-        if piece.chars().any(|c| matches!(c, '*' | '?' | '[' | ']')) {
+        if has_glob_magic(&piece) {
+            recursive = idx + 1 < components.len() || piece.contains("**");
             break;
         }
-        anchor.push(component.as_os_str());
+        root.push(component.as_os_str());
     }
-    if anchor.as_os_str().is_empty() {
-        PathBuf::from(".")
+
+    if root.as_os_str().is_empty() {
+        root = PathBuf::from(".");
+    }
+
+    normalize_watch_root(
+        WatchRoot {
+            path: root,
+            recursive,
+        },
+        cwd,
+    )
+}
+
+fn normalize_watch_root(root: WatchRoot, cwd: &Path) -> WatchRoot {
+    let recursive = root.recursive;
+    let path = if root.path.is_absolute() {
+        root.path
     } else {
-        anchor
-    }
+        cwd.join(root.path)
+    };
+
+    let path = if path.exists() {
+        std::fs::canonicalize(&path).unwrap_or(path)
+    } else {
+        path
+    };
+
+    WatchRoot { path, recursive }
 }
 
 fn has_glob_magic(input: &str) -> bool {
     input.chars().any(|c| matches!(c, '*' | '?' | '[' | ']'))
 }
 
-fn path_key(path: &Path) -> PathBuf {
-    match std::fs::canonicalize(path) {
-        Ok(canonical) => canonical,
-        Err(_) => path.to_path_buf(),
+fn path_candidates(path: &Path, cwd: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::with_capacity(3);
+    candidates.push(path.to_path_buf());
+
+    if path.is_absolute() {
+        if let Ok(relative) = path.strip_prefix(cwd) {
+            candidates.push(relative.to_path_buf());
+        }
+    } else {
+        candidates.push(cwd.join(path));
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn normalized_path_key(path: &Path, cwd: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+
+    if absolute.exists() {
+        std::fs::canonicalize(&absolute).unwrap_or(absolute)
+    } else {
+        absolute
     }
 }
 
@@ -291,6 +439,7 @@ fn path_key(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Write;
     use std::thread;
     use tempfile::tempdir;
     use tokio::sync::mpsc as tokio_mpsc;
@@ -298,35 +447,82 @@ mod tests {
 
     #[test]
     fn parses_glob_and_literal_specs() {
-        let specs = parse_specs(&["logs/*.log".to_string(), "app.log".to_string()]).unwrap();
-        assert_eq!(specs.len(), 2);
-        assert!(matches!(specs[0].kind, SpecKind::Glob(_)));
-        assert!(matches!(specs[1].kind, SpecKind::Literal(_)));
+        let cwd = PathBuf::from("/tmp/cattail-test");
+        let plan =
+            build_watch_plan(&["logs/*.log".to_string(), "app.log".to_string()], &cwd).unwrap();
+        assert_eq!(plan.specs.len(), 2);
+        assert!(matches!(plan.specs[0].kind, SpecKind::Glob(_)));
+        assert!(matches!(plan.specs[1].kind, SpecKind::Literal(_)));
+    }
+
+    #[test]
+    fn root_planner_uses_narrow_roots() {
+        let dir = tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        fs::create_dir(&logs).unwrap();
+
+        let plan = build_watch_plan(
+            &[
+                format!("{}/{}.log", logs.display(), "*"),
+                format!("{}/**/*.txt", logs.display()),
+            ],
+            dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(plan.roots.len(), 1);
+        assert_eq!(plan.roots[0].path, fs::canonicalize(&logs).unwrap());
+        assert!(plan.roots[0].recursive);
     }
 
     #[test]
     fn glob_overlap_matches_existing_only_once() {
+        let cwd = PathBuf::from("/tmp/cattail-test");
         let a = WatchSpec {
             kind: SpecKind::Glob(Pattern::new("logs/*.log").unwrap()),
-            root: PathBuf::from("logs"),
+            root: WatchRoot {
+                path: cwd.join("logs"),
+                recursive: false,
+            },
         };
         let b = WatchSpec {
             kind: SpecKind::Glob(Pattern::new("logs/or*.log").unwrap()),
-            root: PathBuf::from("logs"),
+            root: WatchRoot {
+                path: cwd.join("logs"),
+                recursive: false,
+            },
         };
-        let path = PathBuf::from("logs/orcas.log");
-        assert!(a.matches(&path));
-        assert!(b.matches(&path));
+        let path = cwd.join("logs/orcas.log");
+        assert!(a.matches(&path, &cwd));
+        assert!(b.matches(&path, &cwd));
         let mut registry = HashSet::new();
-        let key = path_key(&path);
+        let key = normalized_path_key(&path, &cwd);
         assert!(registry.insert(key.clone()));
         assert!(!registry.insert(key));
     }
 
     #[test]
-    fn watch_root_uses_parent_ancestor() {
-        let spec = parse_specs(&["logs/*.log".to_string()]).unwrap().remove(0);
-        assert_eq!(spec.root, PathBuf::from("."));
+    fn recursive_glob_plans_recursive_watch() {
+        let cwd = PathBuf::from("/tmp/cattail-test");
+        let spec = build_watch_plan(&["logs/**/*.log".to_string()], &cwd)
+            .unwrap()
+            .specs
+            .remove(0);
+        assert!(spec.root.recursive);
+        assert_eq!(spec.root.path, cwd.join("logs"));
+    }
+
+    #[test]
+    fn watch_root_for_literal_uses_parent_directory() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("app.log");
+        fs::write(&file, "x\n").unwrap();
+        let spec = build_watch_plan(&[file.display().to_string()], dir.path())
+            .unwrap()
+            .specs
+            .remove(0);
+        assert_eq!(spec.root.path, dir.path());
+        assert!(!spec.root.recursive);
     }
 
     #[test]
@@ -334,7 +530,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("a.log");
         fs::write(&path, "x\n").unwrap();
-        let key = path_key(&path);
+        let key = normalized_path_key(&path, dir.path());
         assert!(key.is_absolute());
     }
 
@@ -368,7 +564,6 @@ mod tests {
         assert_eq!(second.line, "ready");
 
         let mut file_handle = fs::OpenOptions::new().append(true).open(&file).unwrap();
-        use std::io::Write;
         writeln!(file_handle, "live").unwrap();
         let third = wait_for_line(&mut rx).await;
         assert_eq!(third.line, "live");
@@ -403,6 +598,44 @@ mod tests {
         let line = wait_for_line(&mut rx).await;
         assert_eq!(line.label, "orcas.log");
         assert_eq!(line.line, "one");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(rx.try_recv().is_err());
+
+        runtime.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_and_following_stay_single_stream() {
+        let dir = tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        fs::create_dir(&logs).unwrap();
+        let file = logs.join("app.log");
+        fs::write(&file, "boot\n").unwrap();
+
+        let pattern = format!("{}/{}.log", logs.display(), "*");
+        let config = Config {
+            lines: 50,
+            interval_ms: 25,
+            prefix: crate::cli::PrefixMode::Basename,
+            since_now: false,
+            color: crate::cli::ColorMode::Never,
+            inputs: vec![pattern],
+        };
+        let (tx, rx) = mpsc::channel();
+        let runtime = start(config, tx).unwrap();
+        let mut rx = forward_receiver(rx);
+
+        let backlog = wait_for_line(&mut rx).await;
+        assert_eq!(backlog.line, "boot");
+
+        let mut file_handle = fs::OpenOptions::new().append(true).open(&file).unwrap();
+        writeln!(file_handle, "live-1").unwrap();
+        writeln!(file_handle, "live-2").unwrap();
+
+        let first = wait_for_line(&mut rx).await;
+        let second = wait_for_line(&mut rx).await;
+        assert_eq!(first.line, "live-1");
+        assert_eq!(second.line, "live-2");
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(rx.try_recv().is_err());
 

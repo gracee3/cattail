@@ -4,6 +4,7 @@
 
 It resolves inputs at startup, prints the last `N` lines from each resolved file, then follows appended lines live with a source prefix on every output line.
 It also watches for new files that start matching a glob after launch and attaches them automatically.
+Watch roots are chosen narrowly from the input shape, and repeated filesystem events are coalesced so overlapping inputs do not duplicate output.
 
 ## Quick Start
 

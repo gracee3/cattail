@@ -4,6 +4,7 @@
 
 It resolves file paths and glob patterns at startup, prints a backlog window from each file, then follows appended data live with one prefixed line per emitted record.
 It also watches for newly created files that match an existing glob after launch and attaches them automatically.
+The watcher layer chooses narrow roots from the input shape so `logs/*.log` watches `logs/`, while patterns with nested wildcards expand to recursive watching only when needed.
 
 ## Usage
 
@@ -39,6 +40,7 @@ That means:
 - new appended lines appear promptly after a notify event, or on the next recovery scan/tick
 - partial lines stay buffered until a newline arrives
 - output is serialized through a single printer so lines do not interleave
+- repeated notify bursts are coalesced by path before attachment or wakeup, so overlapping globs do not attach the same file twice
 - a temporarily missing or unreadable file emits one concise stderr notice and is retried on later ticks
 
 ## Prefix Modes
@@ -65,6 +67,17 @@ That behavior is deliberate and tested.
 - Polling remains part of the recovery path, so latency is bounded by `--interval-ms` when notify is silent or ambiguous
 - This is not a full GNU `tail -F` clone
 - No filtering, JSON output, panes, or TUI
+
+## Watch Roots
+
+`cattail` plans watcher roots from the original inputs instead of watching a broad top-level directory.
+
+- literals watch their parent directory
+- simple globs such as `logs/*.log` watch the anchor directory non-recursively
+- globs with wildcards in directory segments or `**` use recursive watching from the closest stable anchor
+- overlapping roots are merged so a recursive root can cover narrower descendants
+
+This keeps notify traffic narrower on larger trees while preserving discovery of new matching files.
 
 ## Smoke Demo
 
