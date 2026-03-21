@@ -23,7 +23,7 @@ pub enum PrefixMode {
     version,
     about = "Tail multiple files and glob patterns",
     long_about = "cattail resolves literal paths and glob patterns at startup, prints a backlog from each file, then follows appended lines live with a stable source prefix. It also watches for newly created files that match startup globs and attaches them automatically.",
-    after_long_help = "Examples:\n  cattail /var/log/syslog /var/log/auth.log\n  cattail -n 100 ~/.local/share/orcas/logs/*.log\n  cattail --since-now --prefix relative 'logs/*.log'",
+    after_long_help = "Examples:\n  cattail /var/log/syslog /var/log/auth.log\n  cattail -n 100 '/var/log/*.log'\n  cattail --since-now --prefix relative '/var/log/*.log'",
     next_line_help = true
 )]
 struct Args {

@@ -34,21 +34,21 @@ seed_file() {
 
 build_binary
 
-file_a="${TMP_DIR}/orcas.log"
-file_b="${TMP_DIR}/orcasd.log"
-file_c="${TMP_DIR}/worker.log"
-file_new="${TMP_DIR}/new-worker.log"
+file_a="${TMP_DIR}/syslog.log"
+file_b="${TMP_DIR}/auth.log"
+file_c="${TMP_DIR}/daemon.log"
+file_new="${TMP_DIR}/new-service.log"
 pattern="${TMP_DIR}/*.log"
 
 seed_file "${file_a}" \
-  "orcas: booting" \
-  "orcas: loading config" \
-  "orcas: ready"
+  "syslog: booting" \
+  "syslog: loading config" \
+  "syslog: ready"
 seed_file "${file_b}" \
-  "orcasd: initializing" \
-  "orcasd: listening"
+  "auth: initializing" \
+  "auth: listening"
 seed_file "${file_c}" \
-  "worker: start"
+  "daemon: start"
 
 log "temp dir: ${TMP_DIR}"
 log "phase 1: launch cattail with the seeded backlog"
@@ -64,35 +64,35 @@ log "phase 5: create brand-new matching file ${file_new}"
 CATTAIL_PID=$!
 
 sleep 1
-printf '%s\n' "orcas: first live line" >> "${file_a}"
-printf '%s\n' "orcasd: first live line" >> "${file_b}"
-printf '%s\n' "worker: first live line" >> "${file_c}"
+printf '%s\n' "syslog: first live line" >> "${file_a}"
+printf '%s\n' "auth: first live line" >> "${file_b}"
+printf '%s\n' "daemon: first live line" >> "${file_c}"
 
 sleep 1
 log "truncating ${file_b} in place"
 : > "${file_b}"
-printf '%s\n' "orcasd: after truncation" >> "${file_b}"
+printf '%s\n' "auth: after truncation" >> "${file_b}"
 
 sleep 1
 log "deleting and recreating ${file_c}"
 rm -f "${file_c}"
 sleep 1
 seed_file "${file_c}" \
-  "worker: recreated line 1" \
-  "worker: recreated line 2"
+  "daemon: recreated line 1" \
+  "daemon: recreated line 2"
 
 sleep 1
 log "creating ${file_new} after launch"
 seed_file "${file_new}" \
-  "new-worker: boot" \
-  "new-worker: ready"
+  "new-service: boot" \
+  "new-service: ready"
 sleep 1
-printf '%s\n' "new-worker: live append" >> "${file_new}"
+printf '%s\n' "new-service: live append" >> "${file_new}"
 
 if [[ "${CATTAIL_SMOKE_BURST:-0}" == "1" ]]; then
   log "optional burst phase: rapid appends to ${file_a}"
   for idx in $(seq 1 5); do
-    printf '%s\n' "orcas: burst ${idx}" >> "${file_a}"
+    printf '%s\n' "syslog: burst ${idx}" >> "${file_a}"
   done
 fi
 

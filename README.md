@@ -36,10 +36,10 @@ make uninstall
 ## Quick Start
 
 ```bash
-cattail ~/.local/share/orcas/logs/*.log
-cattail -n 100 ~/.local/share/orcas/logs/*.log
+cattail /var/log/syslog /var/log/auth.log
+cattail -n 100 '/var/log/*.log'
 cattail --since-now /tmp/a.log /tmp/b.log
-cattail --prefix relative --interval-ms 100 'logs/*.log'
+cattail --prefix relative --interval-ms 100 '/var/log/*.log'
 ```
 
 If you pass a glob, quote it so `cattail` performs the expansion.
