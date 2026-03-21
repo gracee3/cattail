@@ -3,8 +3,17 @@ use crate::tail;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
+use tokio::sync::Notify;
 use tokio::time::{self, Duration};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartMode {
+    StartupBacklog(usize),
+    FromBeginning,
+    FromCurrentEnd,
+}
 
 pub struct FollowState {
     path: PathBuf,
@@ -86,6 +95,80 @@ pub async fn initial_backlog(path: &Path, lines: usize) -> Result<(Vec<String>, 
     Ok((backlog, len))
 }
 
+pub struct WorkerConfig {
+    pub path: PathBuf,
+    pub label: String,
+    pub start_mode: StartMode,
+    pub interval: Duration,
+    pub wake: Arc<Notify>,
+    pub tx: mpsc::Sender<OutputLine>,
+}
+
+pub async fn run_worker(config: WorkerConfig) -> Result<()> {
+    let (mut state, backlog) = initialize_state(&config.path, config.start_mode).await?;
+    for line in backlog {
+        let _ = config.tx.send(OutputLine {
+            label: config.label.clone(),
+            line,
+        });
+    }
+
+    let _ = poll_once(&mut state, &config.label, &config.tx).await;
+
+    let mut tick = time::interval(config.interval);
+    tick.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                let _ = poll_once(&mut state, &config.label, &config.tx).await;
+            }
+            _ = config.wake.notified() => {
+                let _ = poll_once(&mut state, &config.label, &config.tx).await;
+            }
+        }
+    }
+}
+
+async fn initialize_state(
+    path: &Path,
+    start_mode: StartMode,
+) -> Result<(FollowState, Vec<String>)> {
+    let mut state = FollowState::new(path.to_path_buf(), 0);
+    let mut backlog = Vec::new();
+
+    match start_mode {
+        StartMode::StartupBacklog(lines) => {
+            let (lines_out, len, unavailable) = startup_backlog_state(path, lines).await;
+            backlog = lines_out;
+            state.offset = len;
+            state.unavailable = unavailable;
+        }
+        StartMode::FromBeginning => {}
+        StartMode::FromCurrentEnd => match tokio::fs::metadata(path).await {
+            Ok(meta) => {
+                state.offset = meta.len();
+            }
+            Err(err) => {
+                eprintln!("cattail: {}: {err:#}", path.display());
+                state.unavailable = true;
+            }
+        },
+    }
+
+    Ok((state, backlog))
+}
+
+async fn startup_backlog_state(path: &Path, lines: usize) -> (Vec<String>, u64, bool) {
+    match initial_backlog(path, lines).await {
+        Ok((backlog, len)) => (backlog, len, false),
+        Err(err) => {
+            eprintln!("cattail: {}: {err:#}", path.display());
+            (Vec::new(), 0, true)
+        }
+    }
+}
+
 pub async fn watch_file(
     path: PathBuf,
     label: String,
@@ -93,33 +176,18 @@ pub async fn watch_file(
     interval: Duration,
     tx: mpsc::Sender<OutputLine>,
 ) -> Result<()> {
-    let (backlog, len, unavailable) = match initial_backlog(&path, lines).await {
-        Ok((backlog, len)) => (backlog, len, false),
-        Err(err) => {
-            eprintln!("cattail: {}: {err:#}", path.display());
-            (Vec::new(), 0, true)
-        }
-    };
-    for line in backlog {
-        let _ = tx.send(OutputLine {
-            label: label.clone(),
-            line,
-        });
-    }
-
-    let mut state = FollowState::new(path, len);
-    state.unavailable = unavailable;
-
-    let mut tick = time::interval(interval);
-    tick.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-
-    loop {
-        tick.tick().await;
-        let _ = poll_once(&mut state, &label, &tx).await;
-    }
+    run_worker(WorkerConfig {
+        path,
+        label,
+        start_mode: StartMode::StartupBacklog(lines),
+        interval,
+        wake: Arc::new(Notify::new()),
+        tx,
+    })
+    .await
 }
 
-async fn poll_once(
+pub async fn poll_once(
     state: &mut FollowState,
     label: &str,
     tx: &mpsc::Sender<OutputLine>,

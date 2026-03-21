@@ -37,6 +37,8 @@ build_binary
 file_a="${TMP_DIR}/orcas.log"
 file_b="${TMP_DIR}/orcasd.log"
 file_c="${TMP_DIR}/worker.log"
+file_new="${TMP_DIR}/new-worker.log"
+pattern="${TMP_DIR}/*.log"
 
 seed_file "${file_a}" \
   "orcas: booting" \
@@ -53,11 +55,12 @@ log "phase 1: launch cattail with the seeded backlog"
 log "phase 2: append new lines"
 log "phase 3: truncate ${file_b}"
 log "phase 4: recreate ${file_c}"
+log "phase 5: create brand-new matching file ${file_new}"
 
 "${ROOT_DIR}/target/debug/cattail" \
   --interval-ms 100 \
   --prefix basename \
-  "${file_a}" "${file_b}" "${file_c}" &
+  "${pattern}" &
 CATTAIL_PID=$!
 
 sleep 1
@@ -77,6 +80,14 @@ sleep 1
 seed_file "${file_c}" \
   "worker: recreated line 1" \
   "worker: recreated line 2"
+
+sleep 1
+log "creating ${file_new} after launch"
+seed_file "${file_new}" \
+  "new-worker: boot" \
+  "new-worker: ready"
+sleep 1
+printf '%s\n' "new-worker: live append" >> "${file_new}"
 
 sleep 2
 log "stopping cattail"

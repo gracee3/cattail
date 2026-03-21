@@ -3,52 +3,24 @@ pub mod follow;
 pub mod output;
 pub mod resolve;
 pub mod tail;
+pub mod watch;
 
 use anyhow::{Context, Result};
 use std::sync::mpsc;
 
 pub async fn run() -> Result<()> {
     let config = cli::Config::parse();
-    let files = resolve::resolve_inputs(&config.inputs)
-        .context("failed to resolve input paths/patterns")?;
-
-    if files.is_empty() {
-        anyhow::bail!("no files resolved from the provided arguments");
-    }
-
-    let labels = output::Labeler::new(&files, config.prefix);
     let (tx, rx) = mpsc::channel();
 
     let printer = std::thread::spawn(move || output::printer(rx, config.color));
 
-    let mut handles = Vec::with_capacity(files.len());
-    for path in files {
-        let label = labels.label_for(&path);
-        let tx = tx.clone();
-        let lines = config.backlog_lines();
-        let interval = config.interval();
-        handles.push(tokio::spawn(async move {
-            follow::watch_file(path, label, lines, interval, tx).await
-        }));
-    }
-    drop(tx);
+    let runtime = watch::start(config, tx).context("failed to start file watcher")?;
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
     }
 
-    for handle in &handles {
-        handle.abort();
-    }
-    for handle in handles {
-        match handle.await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => eprintln!("cattail: worker error: {err:#}"),
-            Err(err) if err.is_cancelled() => {}
-            Err(err) => eprintln!("cattail: join error: {err}"),
-        }
-    }
-
+    let _ = runtime.shutdown();
     let _ = printer.join();
     Ok(())
 }

@@ -3,6 +3,7 @@
 `cattail` tails multiple log files and glob matches at once.
 
 It resolves inputs at startup, prints the last `N` lines from each resolved file, then follows appended lines live with a source prefix on every output line.
+It also watches for new files that start matching a glob after launch and attaches them automatically.
 
 ## Quick Start
 
@@ -14,7 +15,7 @@ cargo run -- --since-now /tmp/a.log /tmp/b.log
 
 ## Demo Script
 
-Run the smoke demo to see backlog, live appends, truncation, and delete/recreate behavior:
+Run the smoke demo to see backlog, live appends, truncation, delete/recreate, and dynamic discovery behavior:
 
 ```bash
 scripts/smoke_cattail.sh
