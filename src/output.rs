@@ -1,4 +1,5 @@
 use crate::cli::ColorMode;
+use crate::cli::PrefixMode;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::io::IsTerminal;
@@ -17,8 +18,13 @@ pub struct Labeler {
 }
 
 impl Labeler {
-    pub fn new(paths: &[PathBuf]) -> Self {
-        let labels = unique_suffix_labels(paths);
+    pub fn new(paths: &[PathBuf], prefix: PrefixMode) -> Self {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let labels = match prefix {
+            PrefixMode::Basename => basename_labels(paths),
+            PrefixMode::Relative => relative_labels(paths, &cwd),
+            PrefixMode::Full => full_labels(paths, &cwd),
+        };
         Self { labels }
     }
 
@@ -51,7 +57,7 @@ pub fn printer(rx: mpsc::Receiver<OutputLine>, color: ColorMode) -> Result<()> {
     Ok(())
 }
 
-fn unique_suffix_labels(paths: &[PathBuf]) -> HashMap<PathBuf, String> {
+fn basename_labels(paths: &[PathBuf]) -> HashMap<PathBuf, String> {
     let per_path: Vec<(PathBuf, Vec<String>)> = paths
         .iter()
         .cloned()
@@ -117,10 +123,55 @@ fn unique_suffix_labels(paths: &[PathBuf]) -> HashMap<PathBuf, String> {
     }
 }
 
+fn relative_labels(paths: &[PathBuf], cwd: &Path) -> HashMap<PathBuf, String> {
+    let mut labels = HashMap::new();
+    let mut counts = HashMap::new();
+
+    for path in paths {
+        let label = relative_display(path, cwd);
+        *counts.entry(label.clone()).or_insert(0usize) += 1;
+        labels.insert(path.clone(), label);
+    }
+
+    for (path, label) in labels.clone() {
+        if counts.get(&label).copied().unwrap_or(0) > 1 {
+            labels.insert(path.clone(), absolute_display(&path, cwd));
+        }
+    }
+
+    labels
+}
+
+fn full_labels(paths: &[PathBuf], cwd: &Path) -> HashMap<PathBuf, String> {
+    paths
+        .iter()
+        .cloned()
+        .map(|path| {
+            let label = absolute_display(&path, cwd);
+            (path, label)
+        })
+        .collect()
+}
+
+fn relative_display(path: &Path, cwd: &Path) -> String {
+    path.strip_prefix(cwd)
+        .map(|rel| rel.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
+}
+
+fn absolute_display(path: &Path, cwd: &Path) -> String {
+    if path.is_absolute() {
+        path.display().to_string()
+    } else {
+        cwd.join(path).display().to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tempfile::tempdir;
 
     #[test]
     fn disambiguates_basenames() {
@@ -129,9 +180,37 @@ mod tests {
             PathBuf::from("/tmp/orcas.log"),
         ];
 
-        let labels = unique_suffix_labels(&paths);
+        let labels = basename_labels(&paths);
         assert_ne!(labels[&paths[0]], labels[&paths[1]]);
         assert!(labels[&paths[0]].ends_with("orcas.log"));
         assert!(labels[&paths[1]].ends_with("orcas.log"));
+    }
+
+    #[test]
+    fn relative_prefix_uses_cwd_when_possible() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        let logs = cwd.join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let path = logs.join("app.log");
+        std::fs::write(&path, "x\n").unwrap();
+
+        let labels = relative_labels(&[path.clone()], &cwd);
+        assert_eq!(labels[&path], "logs/app.log");
+    }
+
+    #[test]
+    fn full_prefix_uses_absolute_path() {
+        let cwd = PathBuf::from("/tmp/cattail-test");
+        let path = PathBuf::from("logs/app.log");
+        let label = absolute_display(&path, &cwd);
+        assert_eq!(label, "/tmp/cattail-test/logs/app.log");
+    }
+
+    #[test]
+    fn labeler_honors_selected_prefix_mode() {
+        let paths = vec![PathBuf::from("/var/log/app.log")];
+        let labeler = Labeler::new(&paths, PrefixMode::Full);
+        assert_eq!(labeler.label_for(&paths[0]), "/var/log/app.log");
     }
 }

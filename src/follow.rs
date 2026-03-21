@@ -6,8 +6,6 @@ use std::sync::mpsc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::time::{self, Duration};
 
-const POLL_INTERVAL: Duration = Duration::from_millis(200);
-
 pub struct FollowState {
     path: PathBuf,
     offset: u64,
@@ -42,8 +40,10 @@ impl FollowState {
         self.pending.clear();
     }
 
-    pub fn reset_for_reopen(&mut self, len: u64) {
-        self.offset = len;
+    pub fn reset_for_reopen(&mut self) {
+        // Treat a delete/recreate event as a fresh file and read from the
+        // beginning as soon as it reappears.
+        self.offset = 0;
         self.pending.clear();
     }
 
@@ -90,9 +90,16 @@ pub async fn watch_file(
     path: PathBuf,
     label: String,
     lines: usize,
+    interval: Duration,
     tx: mpsc::Sender<OutputLine>,
 ) -> Result<()> {
-    let (backlog, len) = initial_backlog(&path, lines).await?;
+    let (backlog, len, unavailable) = match initial_backlog(&path, lines).await {
+        Ok((backlog, len)) => (backlog, len, false),
+        Err(err) => {
+            eprintln!("cattail: {}: {err:#}", path.display());
+            (Vec::new(), 0, true)
+        }
+    };
     for line in backlog {
         let _ = tx.send(OutputLine {
             label: label.clone(),
@@ -101,7 +108,9 @@ pub async fn watch_file(
     }
 
     let mut state = FollowState::new(path, len);
-    let mut tick = time::interval(POLL_INTERVAL);
+    state.unavailable = unavailable;
+
+    let mut tick = time::interval(interval);
     tick.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
     loop {
@@ -128,9 +137,8 @@ async fn poll_once(
 
     let len = meta.len();
     if state.unavailable {
-        state.reset_for_reopen(len);
+        state.reset_for_reopen();
         state.unavailable = false;
-        return Ok(());
     }
 
     if state.truncation_detected(len) {
@@ -183,6 +191,7 @@ mod tests {
     use std::fs;
     use std::sync::mpsc;
     use tempfile::tempdir;
+    use tokio::time::Duration;
 
     #[test]
     fn truncation_resets_state() {
@@ -220,5 +229,62 @@ mod tests {
         let item = rx.try_recv().unwrap();
         assert_eq!(item.label, "app.log");
         assert_eq!(item.line, "two");
+    }
+
+    #[tokio::test]
+    async fn recreated_file_is_read_from_beginning() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("recreate.log");
+        fs::write(&path, "old\n").unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let mut state = FollowState::new(path.clone(), 999);
+        state.unavailable = true;
+
+        fs::write(&path, "fresh-a\nfresh-b\n").unwrap();
+        poll_once(&mut state, "recreate.log", &tx).await.unwrap();
+        let first = rx.try_recv().unwrap();
+        let second = rx.try_recv().unwrap();
+        assert_eq!(first.line, "fresh-a");
+        assert_eq!(second.line, "fresh-b");
+    }
+
+    #[tokio::test]
+    async fn since_now_skips_backlog_but_follows_new_lines() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("since-now.log");
+        fs::write(&path, "old-a\nold-b\n").unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let label = "since-now.log".to_string();
+        let handle = tokio::spawn(watch_file(
+            path.clone(),
+            label,
+            0,
+            Duration::from_millis(10),
+            tx,
+        ));
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        fs::write(&path, "old-a\nold-b\nnew-c\n").unwrap();
+        let item = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match rx.try_recv() {
+                    Ok(item) => break item,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        panic!("watcher disconnected before emitting a line");
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(item.line, "new-c");
+
+        handle.abort();
+        let _ = handle.await;
     }
 }

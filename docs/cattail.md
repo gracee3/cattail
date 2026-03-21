@@ -2,14 +2,7 @@
 
 `cattail` is a small multi-file tail utility for log-style files.
 
-## What it does
-
-- Expands positional arguments as file paths or glob patterns at startup
-- Deduplicates the resolved file set
-- Prints the last `N` lines from each file first
-- Follows appended content across all files concurrently
-- Prefixes each output line with a source label derived from the file name
-- Handles basic truncation and recreate/reopen cases by polling the file state
+It resolves file paths and glob patterns at startup, prints a backlog window from each file, then follows appended data live with one prefixed line per emitted record.
 
 ## Usage
 
@@ -17,33 +10,74 @@
 cattail ~/.local/share/orcas/logs/*.log
 cattail -n 100 ~/.local/share/orcas/logs/*.log
 cattail -n 0 ~/.local/share/orcas/logs/*.log
-cattail /tmp/a.log /tmp/b.log
+cattail --since-now ~/.local/share/orcas/logs/*.log
+cattail --prefix relative --interval-ms 100 /tmp/a.log /tmp/b.log
 cattail 'logs/*.log'
 ```
 
-Optional color flag:
+## Flags
 
-```bash
-cattail --color auto logs/*.log
-cattail --color always logs/*.log
-cattail --color never logs/*.log
-```
+- `-n, --lines <N>`: backlog line count, default `50`
+- `--since-now`: skip the backlog entirely and only emit new lines after startup
+- `--interval-ms <N>`: polling interval in milliseconds, default `200`
+- `--prefix basename|relative|full`: label format for each line
+- `--color auto|always|never`: optional ANSI color for prefixes
 
-## Current limitations
+`--since-now` wins over `--lines` when both are supplied.
+
+## Follow Model
+
+`cattail` uses a polling loop per file rather than filesystem notifications.
+
+That means:
+
+- new appended lines appear on the next poll tick
+- partial lines stay buffered until a newline arrives
+- output is serialized through a single printer so lines do not interleave
+- a temporarily missing or unreadable file emits one concise stderr notice and is retried on later ticks
+
+## Prefix Modes
+
+- `basename`: default; uses the shortest unique suffix ending in the file name
+- `relative`: uses a path relative to the current working directory when possible
+- `full`: uses an absolute path
+
+If two files would produce the same label in `relative` mode, `cattail` widens the colliding labels to a full path form for those entries.
+
+## Truncation and Recreate Policy
+
+The follow loop keeps a byte offset for each file.
+
+- If a file shrinks in place, `cattail` treats that as truncation, resets the offset to `0`, and continues from the new beginning of the file.
+- If a watched file disappears and later reappears at the same path, `cattail` treats the reappearance as a fresh file and starts reading it from the beginning on the first successful poll.
+
+That behavior is deliberate and tested.
+
+## Current Limitations
 
 - Startup discovery only: new files that start matching an existing glob after launch are not discovered
-- Follow mode uses periodic polling rather than filesystem notifications
-- Output is line-oriented; partial lines are buffered until newline in live mode
-- This is not a full GNU `tail -F` replacement
+- Polling-based follow means latency is bounded by `--interval-ms`
+- This is not a full GNU `tail -F` clone
+- No filtering, JSON output, panes, or TUI
 
-## Implementation note
+## Smoke Demo
 
-The MVP is organized as:
+The smoke script exercises the product end to end:
 
-- `cli.rs` for parsing
-- `resolve.rs` for glob expansion and deduplication
-- `tail.rs` for initial backlog extraction
-- `follow.rs` for per-file polling, truncation, and reopen handling
-- `output.rs` for stable label selection and serialized stdout writes
+```bash
+scripts/smoke_cattail.sh
+```
 
-The main tradeoff is polling instead of `notify`. That keeps the code small and predictable while still handling append, truncate, disappear, and reappear cases well enough for active logs.
+It creates temporary log files, seeds backlog lines, launches `cattail`, appends new lines, truncates one file, and deletes/recreates another so you can observe the current lifecycle behavior in one run.
+
+## Implementation Note
+
+Module layout:
+
+- `cli.rs`: CLI parsing and config
+- `resolve.rs`: glob expansion and deduplication
+- `tail.rs`: last-N backlog extraction
+- `follow.rs`: per-file polling, truncation, and reopen handling
+- `output.rs`: prefix selection and serialized stdout writing
+
+The main tradeoff remains polling instead of `notify`. That keeps the code compact and predictable while still being reliable enough for active log use in this MVP.

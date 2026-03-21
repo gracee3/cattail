@@ -16,7 +16,7 @@ pub async fn run() -> Result<()> {
         anyhow::bail!("no files resolved from the provided arguments");
     }
 
-    let labels = output::Labeler::new(&files);
+    let labels = output::Labeler::new(&files, config.prefix);
     let (tx, rx) = mpsc::channel();
 
     let printer = std::thread::spawn(move || output::printer(rx, config.color));
@@ -25,9 +25,10 @@ pub async fn run() -> Result<()> {
     for path in files {
         let label = labels.label_for(&path);
         let tx = tx.clone();
-        let lines = config.lines;
+        let lines = config.backlog_lines();
+        let interval = config.interval();
         handles.push(tokio::spawn(async move {
-            follow::watch_file(path, label, lines, tx).await
+            follow::watch_file(path, label, lines, interval, tx).await
         }));
     }
     drop(tx);

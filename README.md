@@ -1,3 +1,26 @@
 # cattail
 
-See [docs/cattail.md](docs/cattail.md) for usage, current limitations, and the implementation note.
+`cattail` tails multiple log files and glob matches at once.
+
+It resolves inputs at startup, prints the last `N` lines from each resolved file, then follows appended lines live with a source prefix on every output line.
+
+## Quick Start
+
+```bash
+cargo run -- ~/.local/share/orcas/logs/*.log
+cargo run -- -n 100 --prefix relative --interval-ms 100 logs/*.log
+cargo run -- --since-now /tmp/a.log /tmp/b.log
+```
+
+## Demo Script
+
+Run the smoke demo to see backlog, live appends, truncation, and delete/recreate behavior:
+
+```bash
+scripts/smoke_cattail.sh
+```
+
+## Docs
+
+- [Usage and behavior](docs/cattail.md)
+- [Smoke script](scripts/smoke_cattail.sh)
