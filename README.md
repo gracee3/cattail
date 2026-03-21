@@ -1,5 +1,10 @@
 # cattail
 
+[![CI](https://github.com/gracee3/cattail/actions/workflows/ci.yml/badge.svg)](https://github.com/gracee3/cattail/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/cattail.svg)](https://crates.io/crates/cattail)
+[![docs.rs](https://docs.rs/cattail/badge.svg)](https://docs.rs/cattail)
+[![license](https://img.shields.io/crates/l/cattail.svg)](LICENSE)
+
 `cattail` tails multiple files and glob patterns at once, keeps a prefixed line
 per record, and follows new data as files grow or reappear.
 
