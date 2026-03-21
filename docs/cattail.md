@@ -67,6 +67,14 @@ That behavior is deliberate and tested.
 - Polling remains part of the recovery path, so latency is bounded by `--interval-ms` when notify is silent or ambiguous
 - This is not a full GNU `tail -F` clone
 - No filtering, JSON output, panes, or TUI
+- Exact ordering between different files is best effort only; per-file ordering is preserved, but inter-file ordering depends on event timing and scheduling
+
+## Known Edge Conditions
+
+- Some filesystem backends coalesce or drop very noisy bursts; `cattail` treats notify as a wakeup path and uses polling as recovery, but extremely transient changes can still be observed on the next scan tick rather than instantly
+- Newly discovered files that already contain history are intentionally read from the beginning of their current contents, so the first attach may replay pre-existing lines once
+- Delete/recreate is intentionally treated as a fresh file once the disappearance is observed; if a backend misses the missing window entirely, recovery still converges on the current file contents
+- Very broad globs are still narrowed by the watcher planner, but the tool is not attempting full filesystem indexing or perfect tail parity
 
 ## Watch Roots
 
@@ -88,6 +96,8 @@ scripts/smoke_cattail.sh
 ```
 
 It creates temporary log files, seeds backlog lines, launches `cattail`, appends new lines, truncates one file, deletes/recreates another, and creates a brand-new matching file after launch so you can observe the current lifecycle behavior in one run.
+
+Set `CATTAIL_SMOKE_BURST=1` to add a short burst phase that rapidly appends several extra lines to one file.
 
 ## Implementation Note
 

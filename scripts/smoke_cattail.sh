@@ -89,6 +89,13 @@ seed_file "${file_new}" \
 sleep 1
 printf '%s\n' "new-worker: live append" >> "${file_new}"
 
+if [[ "${CATTAIL_SMOKE_BURST:-0}" == "1" ]]; then
+  log "optional burst phase: rapid appends to ${file_a}"
+  for idx in $(seq 1 5); do
+    printf '%s\n' "orcas: burst ${idx}" >> "${file_a}"
+  done
+fi
+
 sleep 2
 log "stopping cattail"
 kill "${CATTAIL_PID}" 2>/dev/null || true

@@ -22,6 +22,8 @@ Run the smoke demo to see backlog, live appends, truncation, delete/recreate, an
 scripts/smoke_cattail.sh
 ```
 
+Set `CATTAIL_SMOKE_BURST=1` to add a short burst phase to the demo.
+
 ## Docs
 
 - [Usage and behavior](docs/cattail.md)
