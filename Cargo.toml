@@ -2,6 +2,27 @@
 name = "cattail"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.74"
+license = "MIT"
+description = "Tail multiple files and glob patterns with live discovery and labeled output"
+readme = "README.md"
+repository = "https://github.com/gracee3/cattail"
+homepage = "https://github.com/gracee3/cattail"
+documentation = "https://docs.rs/cattail"
+keywords = ["tail", "log", "cli", "filesystem", "glob"]
+categories = ["command-line-utilities", "filesystem"]
+include = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "LICENSE",
+    "README.md",
+    "Makefile",
+    "docs/**",
+    "packaging/**",
+    "scripts/**",
+    "src/**",
+    "tests/**",
+]
 
 [dependencies]
 anyhow = "1"

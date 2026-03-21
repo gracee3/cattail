@@ -1,3 +1,5 @@
+//! `cattail` tails multiple files and glob patterns with live discovery.
+
 pub mod cli;
 pub mod follow;
 pub mod output;

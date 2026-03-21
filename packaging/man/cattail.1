@@ -1,0 +1,65 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH cattail 1  "cattail 0.1.0" 
+.SH NAME
+cattail \- Tail multiple files and glob patterns
+.SH SYNOPSIS
+\fBcattail\fR [\fB\-n\fR|\fB\-\-lines\fR] [\fB\-\-interval\-ms\fR] [\fB\-\-prefix\fR] [\fB\-\-since\-now\fR] [\fB\-\-color\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIPATH|GLOB\fR> 
+.SH DESCRIPTION
+cattail resolves literal paths and glob patterns at startup, prints a backlog from each file, then follows appended lines live with a stable source prefix. It also watches for newly created files that match startup globs and attaches them automatically.
+.SH OPTIONS
+.TP
+\fB\-n\fR, \fB\-\-lines\fR \fI<N>\fR [default: 50]
+Number of backlog lines to print per startup\-resolved file
+.TP
+\fB\-\-interval\-ms\fR \fI<MS>\fR [default: 200]
+Polling interval in milliseconds for recovery scans and file reopen checks
+.TP
+\fB\-\-prefix\fR \fI<PREFIX>\fR [default: basename]
+How to label each output line
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+basename
+.IP \(bu 2
+relative
+.IP \(bu 2
+full
+.RE
+.TP
+\fB\-\-since\-now\fR
+Skip the backlog and only emit lines appended after startup
+.TP
+\fB\-\-color\fR \fI<COLOR>\fR [default: auto]
+Colorize line prefixes when writing to an interactive terminal
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+auto
+.IP \(bu 2
+always
+.IP \(bu 2
+never
+.RE
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.TP
+<\fIPATH|GLOB\fR>
+One or more file paths or glob patterns
+.SH EXTRA
+Examples:
+  cattail /var/log/syslog /var/log/auth.log
+  cattail \-n 100 ~/.local/share/orcas/logs/*.log
+  cattail \-\-since\-now \-\-prefix relative \*(Aqlogs/*.log\*(Aq
+.SH VERSION
+v0.1.0

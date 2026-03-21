@@ -1,4 +1,4 @@
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum};
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -18,24 +18,60 @@ pub enum PrefixMode {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "cattail", about = "Tail multiple files and glob patterns")]
+#[command(
+    name = "cattail",
+    version,
+    about = "Tail multiple files and glob patterns",
+    long_about = "cattail resolves literal paths and glob patterns at startup, prints a backlog from each file, then follows appended lines live with a stable source prefix. It also watches for newly created files that match startup globs and attaches them automatically.",
+    after_long_help = "Examples:\n  cattail /var/log/syslog /var/log/auth.log\n  cattail -n 100 ~/.local/share/orcas/logs/*.log\n  cattail --since-now --prefix relative 'logs/*.log'",
+    next_line_help = true
+)]
 struct Args {
-    #[arg(short = 'n', long = "lines", default_value_t = 50)]
+    #[arg(
+        short = 'n',
+        long = "lines",
+        value_name = "N",
+        default_value_t = 50,
+        help = "Number of backlog lines to print per startup-resolved file"
+    )]
     lines: usize,
 
-    #[arg(long = "interval-ms", default_value_t = 200)]
+    #[arg(
+        long = "interval-ms",
+        value_name = "MS",
+        default_value_t = 200,
+        help = "Polling interval in milliseconds for recovery scans and file reopen checks"
+    )]
     interval_ms: u64,
 
-    #[arg(long = "prefix", value_enum, default_value_t = PrefixMode::Basename)]
+    #[arg(
+        long = "prefix",
+        value_enum,
+        default_value_t = PrefixMode::Basename,
+        help = "How to label each output line"
+    )]
     prefix: PrefixMode,
 
-    #[arg(long = "since-now", default_value_t = false)]
+    #[arg(
+        long = "since-now",
+        default_value_t = false,
+        help = "Skip the backlog and only emit lines appended after startup"
+    )]
     since_now: bool,
 
-    #[arg(long = "color", value_enum, default_value_t = ColorMode::Auto)]
+    #[arg(
+        long = "color",
+        value_enum,
+        default_value_t = ColorMode::Auto,
+        help = "Colorize line prefixes when writing to an interactive terminal"
+    )]
     color: ColorMode,
 
-    #[arg(required = true)]
+    #[arg(
+        required = true,
+        value_name = "PATH|GLOB",
+        help = "One or more file paths or glob patterns"
+    )]
     inputs: Vec<String>,
 }
 
@@ -83,6 +119,10 @@ impl Config {
     }
 }
 
+pub fn command() -> clap::Command {
+    Args::command()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,5 +150,14 @@ mod tests {
 
         assert!(config.since_now);
         assert_eq!(config.backlog_lines(), 0);
+    }
+
+    #[test]
+    fn help_mentions_examples_and_flags() {
+        let mut cmd = command();
+        let help = cmd.render_long_help().to_string();
+        assert!(help.contains("--since-now"));
+        assert!(help.contains("--interval-ms"));
+        assert!(help.contains("Examples:"));
     }
 }
