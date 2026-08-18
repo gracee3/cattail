@@ -60,10 +60,7 @@ impl FollowState {
         self.pending.extend_from_slice(bytes);
         let mut out = Vec::new();
 
-        loop {
-            let Some(pos) = self.pending.iter().position(|&b| b == b'\n') else {
-                break;
-            };
+        while let Some(pos) = self.pending.iter().position(|&b| b == b'\n') {
             let mut line = self.pending.drain(..=pos).collect::<Vec<u8>>();
             if line.last() == Some(&b'\n') {
                 line.pop();

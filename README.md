@@ -1,6 +1,10 @@
 # cattail
 
-**Status:** Pre-release. The repository includes working code, tests, CI, and packaging support, but `cargo install cattail` is not a release guarantee until a crates.io version is published.
+**Status:** Released. Version 0.1.0 is published on
+[crates.io](https://crates.io/crates/cattail) and as a matching
+[GitHub release](https://github.com/gracee3/cattail/releases/tag/v0.1.0).
+Current `main` contains post-release maintenance work; see the
+[changelog](CHANGELOG.md).
 
 [![CI](https://github.com/gracee3/cattail/actions/workflows/ci.yml/badge.svg)](https://github.com/gracee3/cattail/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -20,10 +24,10 @@ It is designed for log-style files in active use:
 
 ## Install
 
-After release, install from crates.io:
+Install the released crate and its recorded dependency set:
 
 ```bash
-cargo install cattail
+cargo install cattail --locked
 ```
 
 For local development from this checkout:
@@ -88,7 +92,19 @@ Set `CATTAIL_SMOKE_BURST=1` to add a short burst phase to the demo.
 
 - [Operator/runtime behavior](docs/cattail.md)
 - [Release checklist](docs/release.md)
+- [Dependency and generated-asset provenance](docs/provenance.md)
+- [Changelog](CHANGELOG.md)
 - [Smoke script](scripts/smoke_cattail.sh)
+
+## Development and support
+
+The current development baseline is Rust 1.85 or newer. Default checks are
+local Rust builds and filesystem fixtures; they do not require a service,
+container, dataset, or special hardware.
+
+This is a personal utility built around the author's own log-following workflow.
+Focused correctness fixes and reproducible filesystem-behavior reports are
+useful, but no support or response-time commitment is implied.
 
 ## Limitations
 
